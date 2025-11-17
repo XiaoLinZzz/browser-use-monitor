@@ -54,6 +54,7 @@ jobs:
               const url = new URL(process.env.LARK_WEBHOOK);
               const data = JSON.stringify({
                 fields: {
+                  "Release 标题": content.title,
                   "版本": content.version,
                   "发布时间": content.publishedAt,
                   "Commits 数量": content.commitCount,
@@ -145,6 +146,7 @@ jobs:
                 .join('\n');
               
               const content = {
+                title: latestRelease.name || latestRelease.tag_name,
                 version: latestRelease.tag_name,
                 publishedAt: new Date(latestRelease.published_at).toLocaleString('zh-CN'),
                 commitCount: commits.length,
@@ -173,3 +175,11 @@ jobs:
           
           main();
           NODEEOF
+      
+      - name: Commit release record
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add .browser-use-release-record.json || true
+          git diff --staged --quiet || git commit -m "chore: update release record [skip ci]"
+          git push || true
