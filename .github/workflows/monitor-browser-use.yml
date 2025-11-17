@@ -1,0 +1,177 @@
+name: Monitor browser-use releases
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'  # 每6小时检查一次
+  workflow_dispatch:
+
+jobs:
+  check-releases:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+      
+      - name: Set up Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+      
+      - name: Check for new releases
+        env:
+          LARK_WEBHOOK: ${{ secrets.LARK_WEBHOOK_URL }}
+        run: |
+          node - << 'EOF'
+          const fs = require('fs');
+          const https = require('https');
+          
+          const GITHUB_API = 'https://api.github.com';
+          const OWNER = 'browser-use';
+          const REPO = 'browser-use';
+          const RECORD_FILE = '.browser-use-release-record.json';
+          
+          function makeRequest(url, headers = {}) {
+            return new Promise((resolve, reject) => {
+              https.get(url, { headers }, (res) => {
+                let data = '';
+                res.on('data', chunk => data += chunk);
+                res.on('end', () => {
+                  if (res.statusCode >= 200 && res.statusCode < 300) {
+                    resolve(JSON.parse(data));
+                  } else {
+                    reject(new Error(`HTTP ${res.statusCode}: ${data}`));
+                  }
+                });
+              }).on('error', reject);
+            });
+          }
+          
+          function postToLark(content) {
+            return new Promise((resolve, reject) => {
+              const url = new URL(process.env.LARK_WEBHOOK);
+              const data = JSON.stringify({
+                fields: {
+                  "版本": content.version,
+                  "发布时间": content.publishedAt,
+                  "Commits 数量": content.commitCount,
+                  "主要变更": content.description,
+                  "提交链接": content.compareUrl,
+                  "Release 链接": content.releaseUrl,
+                }
+              });
+              
+              const options = {
+                hostname: url.hostname,
+                path: url.pathname + url.search,
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Content-Length': Buffer.byteLength(data)
+                }
+              };
+              
+              const req = https.request(options, (res) => {
+                let responseData = '';
+                res.on('data', chunk => responseData += chunk);
+                res.on('end', () => {
+                  console.log('Lark response:', responseData);
+                  resolve();
+                });
+              });
+              
+              req.on('error', reject);
+              req.write(data);
+              req.end();
+            });
+          }
+          
+          async function main() {
+            try {
+              console.log('Fetching latest releases...');
+              
+              // 获取最新的两个 releases
+              const releasesUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/releases?per_page=2`;
+              const releases = await makeRequest(releasesUrl);
+              
+              if (releases.length === 0) {
+                console.log('No releases found');
+                return;
+              }
+              
+              const latestRelease = releases[0];
+              const previousRelease = releases.length > 1 ? releases[1] : null;
+              
+              // 读取上次记录的 release
+              let lastProcessedTag = null;
+              if (fs.existsSync(RECORD_FILE)) {
+                try {
+                  const record = JSON.parse(fs.readFileSync(RECORD_FILE, 'utf-8'));
+                  lastProcessedTag = record.lastTag;
+                } catch (e) {
+                  console.log('Could not read record file, will process anyway');
+                }
+              }
+              
+              // 检查是否已经处理过这个版本
+              if (lastProcessedTag === latestRelease.tag_name) {
+                console.log('Already processed this release:', latestRelease.tag_name);
+                return;
+              }
+              
+              console.log('New release found:', latestRelease.tag_name);
+              
+              // 获取 commits
+              let baseTag = previousRelease ? previousRelease.tag_name : null;
+              let commits = [];
+              
+              if (baseTag) {
+                console.log(`Comparing ${baseTag} to ${latestRelease.tag_name}`);
+                const compareUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/compare/${baseTag}...${latestRelease.tag_name}`;
+                const comparison = await makeRequest(compareUrl);
+                commits = comparison.commits || [];
+              } else {
+                console.log('No previous release, fetching commits for this tag');
+                const tagsUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/releases/tags/${latestRelease.tag_name}`;
+                const tagData = await makeRequest(tagsUrl);
+                
+                // 获取这个 tag 对应的 commit
+                const commitUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/commits?sha=${latestRelease.tag_name}&per_page=10`;
+                const commitData = await makeRequest(commitUrl);
+                commits = commitData || [];
+              }
+              
+              // 准备飞书数据
+              const commitMessages = commits
+                .map(c => `- ${c.commit.message.split('\n')[0]} (${c.author?.login || 'unknown'})`)
+                .slice(0, 10)
+                .join('\n');
+              
+              const content = {
+                version: latestRelease.tag_name,
+                publishedAt: new Date(latestRelease.published_at).toLocaleString('zh-CN'),
+                commitCount: commits.length,
+                description: commitMessages || latestRelease.body?.slice(0, 200) || 'No description',
+                compareUrl: previousRelease 
+                  ? `https://github.com/${OWNER}/${REPO}/compare/${previousRelease.tag_name}...${latestRelease.tag_name}`
+                  : `https://github.com/${OWNER}/${REPO}/releases/tag/${latestRelease.tag_name}`,
+                releaseUrl: latestRelease.html_url,
+              };
+              
+              console.log('Sending to Lark:', content);
+              await postToLark(content);
+              
+              // 保存记录
+              fs.writeFileSync(RECORD_FILE, JSON.stringify({
+                lastTag: latestRelease.tag_name,
+                lastProcessedAt: new Date().toISOString()
+              }));
+              
+              console.log('Successfully processed release:', latestRelease.tag_name);
+              
+            } catch (error) {
+              console.error('Error:', error);
+              process.exit(1);
+            }
+          }
+          
+          main();
+          EOF
