@@ -20,7 +20,7 @@ jobs:
         env:
           LARK_WEBHOOK: ${{ secrets.LARK_WEBHOOK_URL }}
         run: |
-          node - << 'EOF'
+          node - << 'NODEEOF'
           const fs = require('fs');
           const https = require('https');
           
@@ -31,7 +31,11 @@ jobs:
           
           function makeRequest(url, headers = {}) {
             return new Promise((resolve, reject) => {
-              https.get(url, { headers }, (res) => {
+              const defaultHeaders = {
+                'User-Agent': 'browser-use-monitor',
+                ...headers
+              };
+              https.get(url, { headers: defaultHeaders }, (res) => {
                 let data = '';
                 res.on('data', chunk => data += chunk);
                 res.on('end', () => {
@@ -65,7 +69,8 @@ jobs:
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  'Content-Length': Buffer.byteLength(data)
+                  'Content-Length': Buffer.byteLength(data),
+                  'User-Agent': 'browser-use-monitor'
                 }
               };
               
@@ -88,7 +93,6 @@ jobs:
             try {
               console.log('Fetching latest releases...');
               
-              // 获取最新的两个 releases
               const releasesUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/releases?per_page=2`;
               const releases = await makeRequest(releasesUrl);
               
@@ -100,7 +104,6 @@ jobs:
               const latestRelease = releases[0];
               const previousRelease = releases.length > 1 ? releases[1] : null;
               
-              // 读取上次记录的 release
               let lastProcessedTag = null;
               if (fs.existsSync(RECORD_FILE)) {
                 try {
@@ -111,7 +114,6 @@ jobs:
                 }
               }
               
-              // 检查是否已经处理过这个版本
               if (lastProcessedTag === latestRelease.tag_name) {
                 console.log('Already processed this release:', latestRelease.tag_name);
                 return;
@@ -119,7 +121,6 @@ jobs:
               
               console.log('New release found:', latestRelease.tag_name);
               
-              // 获取 commits
               let baseTag = previousRelease ? previousRelease.tag_name : null;
               let commits = [];
               
@@ -133,13 +134,11 @@ jobs:
                 const tagsUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/releases/tags/${latestRelease.tag_name}`;
                 const tagData = await makeRequest(tagsUrl);
                 
-                // 获取这个 tag 对应的 commit
                 const commitUrl = `${GITHUB_API}/repos/${OWNER}/${REPO}/commits?sha=${latestRelease.tag_name}&per_page=10`;
                 const commitData = await makeRequest(commitUrl);
                 commits = commitData || [];
               }
               
-              // 准备飞书数据
               const commitMessages = commits
                 .map(c => `- ${c.commit.message.split('\n')[0]} (${c.author?.login || 'unknown'})`)
                 .slice(0, 10)
@@ -159,7 +158,6 @@ jobs:
               console.log('Sending to Lark:', content);
               await postToLark(content);
               
-              // 保存记录
               fs.writeFileSync(RECORD_FILE, JSON.stringify({
                 lastTag: latestRelease.tag_name,
                 lastProcessedAt: new Date().toISOString()
@@ -174,4 +172,4 @@ jobs:
           }
           
           main();
-          EOF
+          NODEEOF
